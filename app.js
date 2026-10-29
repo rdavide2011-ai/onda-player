@@ -649,7 +649,7 @@ const ui = {
 
 function setImg(el, url) {
   if (url) { if (el.src !== url) el.src = url; el.style.visibility = 'visible'; }
-  else { el.removeAttribute('src'); el.style.visibility = 'hidden'; }
+  else { if (!el.src.endsWith('icons/icon.svg')) el.src = 'icons/icon.svg'; el.style.visibility = 'visible'; }
 }
 
 // Controlli dalla schermata di blocco / cuffie
@@ -704,6 +704,8 @@ const freePlayer = {
 
   load(entry, { expand = true, remember = true } = {}) {
     const box = $('#freePlayer');
+    if (engine.audio && !engine.audio.paused) engine.audio.pause();
+    document.body.classList.add('embed-open');
     if (this.current?.uri !== entry.uri) {
       $('#fpFrame').src = `https://open.spotify.com/embed/${entry.type}/${entry.id}?utm_source=oembed&theme=0`;
     }
@@ -725,6 +727,7 @@ const freePlayer = {
     $('#fpFrame').src = 'about:blank';
     this.current = null;
     $('#freePlayer').hidden = true;
+    document.body.classList.remove('embed-open');
     store.remove('freeCurrent');
     this.updatePad();
   },
@@ -1105,7 +1108,7 @@ function renderSettings() {
     <div class="settings-list">
       ${free ? `<div class="setting">
         <h3>Modalità gratuita</h3>
-        <p>Ascolti con il player ufficiale di Spotify incorporato: non serve Premium né un'app sviluppatore. Con un account gratuito Spotify può mostrare le sue pubblicità e alcuni limiti di riproduzione.</p>
+        <p>Il player di Onda riproduce musica gratuita e legale dal catalogo di Audius e i file musicali che carichi tu, senza pubblicità. I link Spotify si aprono invece nel player ufficiale di Spotify, che con un account gratuito può avere pubblicità e anteprime.</p>
         <div class="actions"><button class="btn ghost small" type="button" id="toPremium">Ho Premium: passa alla modalità Premium</button></div>
       </div>` : `<div class="setting">
         <h3>Account</h3>
@@ -1120,7 +1123,7 @@ function renderSettings() {
       </div>`}
       <div class="setting">
         <h3>Dati salvati sul dispositivo</h3>
-        <p>${lib.saved().length} salvati · ${lib.recent().length} recenti · ${lib.history().length} brani in cronologia. Il login resta su questo dispositivo e non viene esportato.</p>
+        <p>${free ? `${music.playlists().length} playlist · ${music.likes().length} preferiti · ${fileStore.list().length} file musicali. Il backup salva playlist e preferiti, non i file audio.` : `${lib.saved().length} salvati · ${lib.recent().length} recenti · ${lib.history().length} brani in cronologia. Il login resta su questo dispositivo e non viene esportato.`}</p>
         <div class="actions">
           <button class="btn ghost small" type="button" id="exportBtn">Esporta backup</button>
           <label class="btn ghost small" for="importFile" style="cursor:pointer">Importa backup</label>
@@ -1157,19 +1160,692 @@ function renderSettings() {
     try {
       const json = JSON.parse(await file.text());
       if (json.app !== 'onda' || typeof json.data !== 'object') throw new Error();
-      ['saved', 'recent', 'history', 'volume'].forEach(k => { if (k in json.data) store.set(k, json.data[k]); });
+      ['saved', 'recent', 'history', 'volume', 'playlists', 'likes', 'engine'].forEach(k => { if (k in json.data) store.set(k, json.data[k]); });
       toast('Backup importato');
       renderSettings();
     } catch { toast('File di backup non valido', true); }
   };
   $('#wipeBtn').onclick = () => {
-    if (!confirm('Cancellare salvati, cronologia e login da questo dispositivo?')) return;
+    if (!confirm('Cancellare playlist, preferiti, file musicali, cronologia e login da questo dispositivo?')) return;
     player.sdk?.disconnect();
     store.clearAll();
+    try { indexedDB.deleteDatabase('onda-files'); } catch {}
     location.hash = '';
     location.reload();
   };
   on('#changeClient', () => { auth.logout(); store.remove('clientId'); boot(); });
+}
+
+// ======================================================================
+// Onda Music (modalità gratuita): player tutto dentro il sito, senza pubblicità.
+// Fonti legali: catalogo gratuito di Audius + i file audio dell'utente.
+// ======================================================================
+const AUDIUS = 'https://api.audius.co/v1';
+const APP_NAME = 'OndaPlayer';
+
+async function audius(path, query = {}) {
+  const url = new URL(AUDIUS + path);
+  url.searchParams.set('app_name', APP_NAME);
+  Object.entries(query).forEach(([k, v]) => v !== undefined && url.searchParams.set(k, v));
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(res.status === 404 ? 'Non trovato su Audius.' : 'Audius non risponde (' + res.status + '). Riprova tra poco.');
+  return (await res.json()).data;
+}
+
+// Brano normalizzato: { key, src: 'audius' | 'file', id, title, artist, image, duration (ms), link }
+function fromAudius(t) {
+  if (!t) return null;
+  return {
+    key: 'audius:' + t.id, src: 'audius', id: t.id, title: t.title || 'Senza titolo',
+    artist: t.user?.name || '', image: t.artwork?.['480x480'] || t.artwork?.['150x150'] || '',
+    duration: (t.duration || 0) * 1000, link: t.permalink ? 'https://audius.co' + t.permalink : '',
+  };
+}
+const playableAudius = list => (list || []).filter(t => t && t.is_streamable !== false && !t.stream_conditions).map(fromAudius);
+
+// ---------- File audio salvati sul dispositivo (IndexedDB) ----------
+const fileStore = {
+  _db: null,
+  open() {
+    if (this._db) return this._db;
+    this._db = new Promise((resolve, reject) => {
+      const req = indexedDB.open('onda-files', 1);
+      req.onupgradeneeded = () => req.result.createObjectStore('blobs');
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    return this._db;
+  },
+  async tx(mode, fn) {
+    const db = await this.open();
+    return new Promise((resolve, reject) => {
+      const t = db.transaction('blobs', mode);
+      const r = fn(t.objectStore('blobs'));
+      t.oncomplete = () => resolve(r?.result);
+      t.onerror = () => reject(t.error);
+    });
+  },
+  put(id, blob) { return this.tx('readwrite', s => s.put(blob, id)); },
+  get(id) { return this.tx('readonly', s => s.get(id)); },
+  del(id) { return this.tx('readwrite', s => s.delete(id)); },
+  list() { return store.get('files', []); },
+  saveList(list) { store.set('files', list); },
+};
+
+// Legge titolo, artista e copertina dai tag ID3v2 (MP3). Se mancano usa il nome del file.
+async function readTags(file) {
+  const out = { title: '', artist: '', image: '' };
+  try {
+    const head = new Uint8Array(await file.slice(0, 10).arrayBuffer());
+    if (head[0] !== 0x49 || head[1] !== 0x44 || head[2] !== 0x33) return out; // "ID3"
+    const ver = head[3];
+    const size = (head[6] << 21) | (head[7] << 14) | (head[8] << 7) | head[9];
+    const buf = new Uint8Array(await file.slice(10, 10 + Math.min(size, 4 * 1024 * 1024)).arrayBuffer());
+    const decode = (bytes, enc) => {
+      try {
+        if (enc === 1 || enc === 2) {
+          let b = bytes, le = enc === 1;
+          if (enc === 1 && b[0] === 0xfe && b[1] === 0xff) { le = false; b = b.subarray(2); }
+          else if (enc === 1 && b[0] === 0xff && b[1] === 0xfe) { le = true; b = b.subarray(2); }
+          return new TextDecoder(le ? 'utf-16le' : 'utf-16be').decode(b).replace(/\0+$/, '');
+        }
+        return new TextDecoder(enc === 3 ? 'utf-8' : 'latin1').decode(bytes).replace(/\0+$/, '');
+      } catch { return ''; }
+    };
+    let p = 0;
+    while (p + 10 < buf.length) {
+      const id = String.fromCharCode(buf[p], buf[p + 1], buf[p + 2], buf[p + 3]);
+      if (!/^[A-Z0-9]{4}$/.test(id)) break;
+      const fsize = ver === 4
+        ? (buf[p + 4] << 21) | (buf[p + 5] << 14) | (buf[p + 6] << 7) | buf[p + 7]
+        : (buf[p + 4] << 24) | (buf[p + 5] << 16) | (buf[p + 6] << 8) | buf[p + 7];
+      const data = buf.subarray(p + 10, p + 10 + fsize);
+      if (id === 'TIT2') out.title = decode(data.subarray(1), data[0]);
+      if (id === 'TPE1') out.artist = decode(data.subarray(1), data[0]);
+      if (id === 'APIC' && !out.image) {
+        const enc = data[0];
+        let i = 1;
+        while (i < data.length && data[i] !== 0) i++;
+        const mime = new TextDecoder('latin1').decode(data.subarray(1, i)) || 'image/jpeg';
+        i += 2; // fine mime + tipo immagine
+        if (enc === 1 || enc === 2) { while (i + 1 < data.length && !(data[i] === 0 && data[i + 1] === 0)) i += 2; i += 2; }
+        else { while (i < data.length && data[i] !== 0) i++; i += 1; }
+        out.image = await thumbnail(new Blob([data.subarray(i)], { type: mime }));
+      }
+      p += 10 + fsize;
+    }
+  } catch { /* tag illeggibili: si usa il nome del file */ }
+  return out;
+}
+
+// Miniatura piccola (JPEG ~160px) da salvare in localStorage
+function thumbnail(blob) {
+  return new Promise(resolve => {
+    const url = URL.createObjectURL(blob);
+    const im = new Image();
+    im.onload = () => {
+      const s = 160, c = document.createElement('canvas');
+      c.width = c.height = s;
+      const r = Math.max(s / im.width, s / im.height);
+      c.getContext('2d').drawImage(im, (s - im.width * r) / 2, (s - im.height * r) / 2, im.width * r, im.height * r);
+      URL.revokeObjectURL(url);
+      resolve(c.toDataURL('image/jpeg', 0.75));
+    };
+    im.onerror = () => { URL.revokeObjectURL(url); resolve(''); };
+    im.src = url;
+  });
+}
+
+async function importFiles(fileList) {
+  const files = [...fileList].filter(f => f.type.startsWith('audio/') || /\.(mp3|m4a|aac|wav|ogg|oga|flac|opus)$/i.test(f.name));
+  if (!files.length) return toast('Nessun file audio selezionato.', true);
+  try { await navigator.storage?.persist?.(); } catch {}
+  const list = fileStore.list();
+  let ok = 0;
+  for (const f of files) {
+    try {
+      const tags = await readTags(f);
+      const base = f.name.replace(/\.[^.]+$/, '');
+      const [a, t] = base.includes(' - ') ? base.split(' - ', 2) : ['', base];
+      const id = 'f' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+      await fileStore.put(id, f);
+      list.unshift({ key: 'file:' + id, src: 'file', id, title: tags.title || t.trim(), artist: tags.artist || a.trim(), image: tags.image, duration: 0, addedAt: Date.now() });
+      ok++;
+      toast(`Importato ${ok}/${files.length}: ${tags.title || t.trim()}`);
+    } catch (e) {
+      toast('Impossibile salvare ' + f.name + ': spazio esaurito?', true);
+      break;
+    }
+  }
+  fileStore.saveList(list);
+  return ok;
+}
+
+async function deleteFile(id) {
+  await fileStore.del(id).catch(() => {});
+  fileStore.saveList(fileStore.list().filter(f => f.id !== id));
+  // togli il brano anche dalle playlist e dai preferiti
+  music.savePlaylists(music.playlists().map(p => ({ ...p, tracks: p.tracks.filter(t => t.key !== 'file:' + id) })));
+  store.set('likes', music.likes().filter(t => t.key !== 'file:' + id));
+}
+
+// ---------- Playlist e preferiti dell'utente (localStorage) ----------
+const music = {
+  playlists() { return store.get('playlists', []); },
+  savePlaylists(list) { store.set('playlists', list); },
+  playlist(id) { return this.playlists().find(p => p.id === id); },
+  createPlaylist(name, tracks = []) {
+    const p = { id: 'p' + Date.now().toString(36), name: name || 'Nuova playlist', tracks, createdAt: Date.now() };
+    this.savePlaylists([p, ...this.playlists()]);
+    return p;
+  },
+  updatePlaylist(id, patch) { this.savePlaylists(this.playlists().map(p => p.id === id ? { ...p, ...patch } : p)); },
+  deletePlaylist(id) { this.savePlaylists(this.playlists().filter(p => p.id !== id)); },
+  addTo(id, track) {
+    const p = this.playlist(id);
+    if (!p) return false;
+    if (p.tracks.some(t => t.key === track.key)) return false;
+    this.updatePlaylist(id, { tracks: [...p.tracks, slimTrack(track)] });
+    return true;
+  },
+  likes() { return store.get('likes', []); },
+  isLiked(key) { return this.likes().some(t => t.key === key); },
+  toggleLike(track) {
+    let l = this.likes();
+    if (l.some(t => t.key === track.key)) { store.set('likes', l.filter(t => t.key !== track.key)); return false; }
+    store.set('likes', [slimTrack(track), ...l].slice(0, 2000));
+    return true;
+  },
+};
+const slimTrack = t => ({ key: t.key, src: t.src, id: t.id, title: t.title, artist: t.artist, image: t.image, duration: t.duration || 0, link: t.link || '' });
+
+// ---------- Motore audio (HTML5) ----------
+const engine = {
+  audio: null,
+  queue: [],
+  index: -1,
+  shuffle: false,
+  repeat: 'off',
+  objectUrl: null,
+  lastSync: 0,
+
+  init() {
+    if (this.audio) return;
+    const a = this.audio = new Audio();
+    a.preload = 'auto';
+    a.volume = store.get('volume', 70) / 100;
+    const st = store.get('engine', {});
+    this.shuffle = !!st.shuffle;
+    this.repeat = st.repeat || 'off';
+    a.addEventListener('timeupdate', () => { if (performance.now() - this.lastSync > 900) this.sync(); });
+    ['play', 'pause', 'loadedmetadata', 'seeked'].forEach(ev => a.addEventListener(ev, () => this.sync()));
+    a.addEventListener('ended', () => this.onEnded());
+    a.addEventListener('error', () => {
+      if (!a.src || a.src === location.href) return;
+      toast('Questo brano non si può riprodurre, passo al successivo.', true);
+      setTimeout(() => this.next(true), 800);
+    });
+  },
+
+  current() { return this.queue[this.index] || null; },
+
+  async srcFor(t) {
+    if (this.objectUrl) { URL.revokeObjectURL(this.objectUrl); this.objectUrl = null; }
+    if (t.src === 'audius') return `${AUDIUS}/tracks/${encodeURIComponent(t.id)}/stream?app_name=${APP_NAME}`;
+    const blob = await fileStore.get(t.id);
+    if (!blob) throw new Error('File non più presente su questo dispositivo.');
+    this.objectUrl = URL.createObjectURL(blob);
+    return this.objectUrl;
+  },
+
+  async playList(tracks, i = 0, meta) {
+    if (!tracks.length) return;
+    freePlayer.current && freePlayer.close();
+    this.queue = tracks.slice();
+    this.index = Math.max(0, Math.min(i, tracks.length - 1));
+    if (meta) lib.addRecent(meta);
+    await this.load(true);
+  },
+
+  async load(autoplay) {
+    const t = this.current();
+    if (!t) return;
+    try {
+      this.audio.src = await this.srcFor(t);
+      if (autoplay) await this.audio.play();
+    } catch (e) {
+      if (e.name === 'NotAllowedError') toast('Tocca ▶ per avviare l\'audio.');
+      else if (e.name !== 'AbortError') toast(e.message || 'Errore di riproduzione', true);
+    }
+    this.sync();
+  },
+
+  toggle() {
+    if (!this.current()) {
+      const last = store.get('lastQueue');
+      if (last?.queue?.length) { this.queue = last.queue; this.index = last.index || 0; return this.load(true); }
+      return toast('Scegli prima una canzone.');
+    }
+    if (this.audio.paused) this.audio.play().catch(e => e.name === 'NotAllowedError' && toast('Tocca ▶ per avviare l\'audio.'));
+    else this.audio.pause();
+  },
+
+  next(auto = false) {
+    if (!this.queue.length) return;
+    if (this.shuffle && this.queue.length > 1) {
+      let n;
+      do { n = Math.floor(Math.random() * this.queue.length); } while (n === this.index);
+      this.index = n;
+    } else if (this.index + 1 < this.queue.length) {
+      this.index++;
+    } else if (this.repeat === 'context' || !auto) {
+      this.index = 0;
+    } else {
+      this.audio.pause();
+      this.sync();
+      return;
+    }
+    this.load(true);
+  },
+
+  prev() {
+    if (!this.queue.length) return;
+    if (this.audio.currentTime > 3) { this.audio.currentTime = 0; return; }
+    this.index = this.index > 0 ? this.index - 1 : this.queue.length - 1;
+    this.load(true);
+  },
+
+  onEnded() {
+    if (this.repeat === 'track') { this.audio.currentTime = 0; this.audio.play().catch(() => {}); return; }
+    this.next(true);
+  },
+
+  seek(ms) { if (Number.isFinite(this.audio.duration)) this.audio.currentTime = ms / 1000; },
+  setVolume(pct) { store.set('volume', pct); this.audio.volume = pct / 100; },
+  saveModes() { store.set('engine', { shuffle: this.shuffle, repeat: this.repeat }); },
+  toggleShuffle() { this.shuffle = !this.shuffle; this.saveModes(); this.sync(); toast(this.shuffle ? 'Riproduzione casuale attiva' : 'Riproduzione casuale disattivata'); },
+  cycleRepeat() {
+    const order = ['off', 'context', 'track'];
+    this.repeat = order[(order.indexOf(this.repeat) + 1) % 3];
+    this.saveModes();
+    this.sync();
+    toast({ off: 'Ripeti disattivato', context: 'Ripeti la lista', track: 'Ripeti il brano' }[this.repeat]);
+  },
+
+  sync() {
+    this.lastSync = performance.now();
+    const t = this.current();
+    if (!t) { player.setState(null); return; }
+    const a = this.audio;
+    const dur = Number.isFinite(a.duration) ? a.duration * 1000 : t.duration || 0;
+    // salva la durata dei file locali la prima volta che si conosce
+    if (t.src === 'file' && !t.duration && dur) {
+      t.duration = dur;
+      fileStore.saveList(fileStore.list().map(f => f.id === t.id ? { ...f, duration: dur } : f));
+    }
+    player.setState({
+      uri: t.key, name: t.title, artists: t.artist, album: '',
+      image: t.image, imageLarge: t.image,
+      duration: dur, position: a.currentTime * 1000, playing: !a.paused,
+      shuffle: this.shuffle, repeat: this.repeat, contextUri: null,
+    });
+    store.set('lastQueue', { queue: this.queue.slice(0, 300).map(slimTrack), index: this.index });
+  },
+};
+
+// Collega i comandi del player (barra in basso, schermo intero, cuffie) al motore audio
+function useEngineForPlayer() {
+  engine.init();
+  Object.assign(player, {
+    init() {},
+    refreshState() {},
+    isLocal: () => true,
+    toggle: () => engine.toggle(),
+    next: () => engine.next(),
+    prev: () => engine.prev(),
+    seek: ms => engine.seek(ms),
+    setVolume: v => engine.setVolume(v),
+    toggleShuffle: () => engine.toggleShuffle(),
+    cycleRepeat: () => engine.cycleRepeat(),
+    optimistic() {},
+  });
+  player.activeDeviceId = null;
+  player.sdkReady = false;
+  // ripristina l'ultima coda senza farla partire
+  const last = store.get('lastQueue');
+  if (last?.queue?.length && !engine.queue.length) {
+    engine.queue = last.queue;
+    engine.index = Math.min(last.index || 0, last.queue.length - 1);
+    engine.srcFor(engine.current()).then(src => { engine.audio.src = src; engine.sync(); }).catch(() => {});
+  }
+}
+
+// ---------- Viste della modalità gratuita ----------
+function musicRowsHtml(tracks, { removable = false } = {}) {
+  if (!tracks.length) return '<div class="empty">Nessun brano.</div>';
+  return `<div class="row-list">${tracks.map((t, i) => `
+    <div class="row" data-uri="${esc(t.key)}" data-fidx="${i}" tabindex="0" role="button" aria-label="Riproduci ${esc(t.title)}">
+      <span class="num" data-n="${i + 1}">${i + 1}</span>
+      ${t.image ? `<img src="${esc(t.image)}" alt="" loading="lazy" />` : '<div class="ph cover-fallback">♪</div>'}
+      <div class="txt"><strong>${esc(t.title)}</strong><span>${esc(t.artist || (t.src === 'file' ? 'File sul dispositivo' : ''))}</span></div>
+      <span class="dur">${t.duration ? fmt(t.duration) : ''}</span>
+      <span class="row-actions">
+        <button class="icon-btn sm ${music.isLiked(t.key) ? 'on' : ''}" type="button" data-like="${i}" aria-label="Preferito"><svg viewBox="0 0 24 24"><path d="M12 20s-7-4.4-7-10a4 4 0 017-2.6A4 4 0 0119 10c0 5.6-7 10-7 10z"/></svg></button>
+        <button class="icon-btn sm" type="button" data-more="${i}" aria-label="Altre azioni"><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.3" class="fill"/><circle cx="12" cy="12" r="1.3" class="fill"/><circle cx="19" cy="12" r="1.3" class="fill"/></svg></button>
+        ${removable ? `<button class="icon-btn sm" type="button" data-remove="${i}" aria-label="Rimuovi dalla playlist"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>` : ''}
+      </span>
+    </div>`).join('')}</div>`;
+}
+
+function setTracks(tracks, meta) {
+  view()._ftracks = tracks;
+  view()._fmeta = meta || null;
+}
+
+function plTile(p) {
+  const cover = p.tracks.find(t => t.image)?.image || '';
+  return `
+    <div class="tile" data-open="mylist/${esc(p.id)}" tabindex="0" role="link" aria-label="${esc(p.name)}">
+      ${coverHtml(cover, p.name)}
+      <button class="tile-play" type="button" data-play-mylist="${esc(p.id)}" aria-label="Riproduci ${esc(p.name)}"><svg viewBox="0 0 24 24"><path d="M8 5l11 7-11 7z" class="fill"/></svg></button>
+      <strong>${esc(p.name)}</strong><span>${p.tracks.length} brani</span>
+    </div>`;
+}
+
+function audiusPlTile(p) {
+  return `
+    <div class="tile" data-open="apl/${esc(p.id)}" tabindex="0" role="link" aria-label="${esc(p.playlist_name)}">
+      ${coverHtml(p.artwork?.['480x480'] || p.artwork?.['150x150'] || '', p.playlist_name)}
+      <strong>${esc(p.playlist_name)}</strong><span>${esc(p.user?.name || '')} · ${p.track_count || 0} brani</span>
+    </div>`;
+}
+
+async function renderMusicHome() {
+  setActiveNav('home');
+  const tk = ++renderToken;
+  const pls = music.playlists();
+  const hour = new Date().getHours();
+  const hello = hour < 12 ? 'Buongiorno' : hour < 18 ? 'Buon pomeriggio' : 'Buonasera';
+  const recentSpotify = lib.recent().filter(r => r.type !== 'music');
+  view().innerHTML = `
+    <div class="hero">
+      <h1>${hello}</h1>
+      <p>Cerca una canzone, un artista o una playlist e ascoltala qui, senza pubblicità. Puoi anche caricare i tuoi file musicali.</p>
+      <form id="musicSearchHero" autocomplete="off">
+        <label for="musicHeroInput" class="sr-only">Cerca</label>
+        <input id="musicHeroInput" type="text" placeholder="Cerca canzoni, artisti, playlist…" />
+        <button class="btn primary" type="submit">Cerca</button>
+      </form>
+    </div>
+
+    <section class="section">
+      <div class="section-head"><h2>Le mie playlist</h2><button type="button" data-new-playlist>+ Nuova</button></div>
+      ${pls.length ? `<div class="grid">${pls.map(plTile).join('')}</div>` : '<div class="empty">Crea una playlist e aggiungi canzoni con ⋯ oppure col cuore.</div>'}
+    </section>
+
+    <section class="section">
+      <div class="section-head"><h2>Di tendenza</h2><a href="#/search">Cerca</a></div>
+      <div id="trending"><div class="skeleton" style="height:240px"></div></div>
+    </section>
+
+    ${recentSpotify.length ? `<section class="section">
+      <div class="section-head"><h2>Link Spotify aperti</h2><button type="button" data-clear="recent">Cancella</button></div>
+      <div class="grid">${recentSpotify.slice(0, 8).map(tileHtml).join('')}</div>
+    </section>` : ''}
+    <p class="credit">Catalogo musicale gratuito fornito da <a href="https://audius.co" target="_blank" rel="noopener">Audius</a>.</p>`;
+  try {
+    let trending = lib.cache.get('trending', 30 * 60 * 1000);
+    if (!trending) { trending = playableAudius(await audius('/tracks/trending', { limit: 30 })); lib.cache.set('trending', trending); }
+    if (tk !== renderToken) return;
+    $('#trending').innerHTML = musicRowsHtml(trending.slice(0, 20));
+    setTracks(trending.slice(0, 20), { type: 'music', id: 'trending', uri: 'music:trending', name: 'Di tendenza', sub: 'Audius' });
+    ui.renderPlayer();
+  } catch (e) {
+    if (tk === renderToken) $('#trending').innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+  }
+}
+
+let musicSearchType = 'tracks';
+async function renderMusicSearch(q = '') {
+  setActiveNav('search');
+  const tk = ++renderToken;
+  view().innerHTML = `
+    <h1 class="view-title">Cerca</h1>
+    <form id="musicSearchForm" class="field-row" style="margin-bottom:14px" autocomplete="off">
+      <label for="musicSearchInput" class="sr-only">Cerca</label>
+      <input id="musicSearchInput" type="text" placeholder="Canzoni, artisti, playlist" value="${esc(q)}" />
+      <button class="btn primary" type="submit">Cerca</button>
+    </form>
+    <div class="chips">
+      <button type="button" class="chip ${musicSearchType === 'tracks' ? 'active' : ''}" data-mtype="tracks">Brani</button>
+      <button type="button" class="chip ${musicSearchType === 'playlists' ? 'active' : ''}" data-mtype="playlists">Playlist</button>
+    </div>
+    <div id="musicResults">${q ? '<div class="skeleton" style="height:240px"></div>' : '<div class="empty">Scrivi il nome di una canzone o di un artista.</div>'}</div>`;
+  const input = $('#musicSearchInput');
+  if (!q) input.focus();
+  $$('[data-mtype]').forEach(c => c.onclick = () => { musicSearchType = c.dataset.mtype; renderMusicSearch(input.value.trim()); });
+  if (!q) return;
+  try {
+    const box = $('#musicResults');
+    // anche i file sul dispositivo che corrispondono
+    const ql = q.toLowerCase();
+    const localHits = fileStore.list().filter(f => (f.title + ' ' + f.artist).toLowerCase().includes(ql));
+    if (musicSearchType === 'tracks') {
+      const res = playableAudius(await audius('/tracks/search', { query: q, limit: 40 }));
+      if (tk !== renderToken) return;
+      const all = [...localHits, ...res];
+      box.innerHTML = all.length ? musicRowsHtml(all) : '<div class="empty">Nessun risultato.</div>';
+      setTracks(all, { type: 'music', id: 'search', uri: 'music:search:' + q, name: 'Ricerca: ' + q, sub: 'Ricerca' });
+    } else {
+      const res = (await audius('/playlists/search', { query: q, limit: 24 })).filter(p => p && p.track_count);
+      if (tk !== renderToken) return;
+      box.innerHTML = res.length ? `<div class="grid">${res.map(audiusPlTile).join('')}</div>` : '<div class="empty">Nessuna playlist trovata.</div>';
+    }
+    ui.renderPlayer();
+  } catch (e) {
+    if (tk === renderToken) $('#musicResults').innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+  }
+}
+
+function renderMusicLibrary() {
+  setActiveNav('library');
+  ++renderToken;
+  const files = fileStore.list();
+  const likes = music.likes();
+  view().innerHTML = `
+    <h1 class="view-title">Libreria</h1>
+    <div class="grid" style="margin-bottom:30px">
+      <div class="tile" data-open="likes" tabindex="0" role="link">
+        <div class="cover cover-fallback"><svg viewBox="0 0 24 24" style="width:42px;height:42px"><path class="fill" d="M12 20s-7-4.4-7-10a4 4 0 017-2.6A4 4 0 0119 10c0 5.6-7 10-7 10z"/></svg></div>
+        <strong>Preferiti</strong><span>${likes.length} brani</span>
+      </div>
+      <div class="tile" data-open="files" tabindex="0" role="link">
+        <div class="cover cover-fallback"><svg viewBox="0 0 24 24" style="width:42px;height:42px"><path d="M9 18V5l11-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/></svg></div>
+        <strong>I miei file</strong><span>${files.length} brani sul dispositivo</span>
+      </div>
+      ${music.playlists().map(plTile).join('')}
+    </div>
+    <div class="detail-actions">
+      <button class="btn primary small" type="button" data-new-playlist>+ Nuova playlist</button>
+      <label class="btn ghost small" for="importAudio" style="cursor:pointer">Carica file musicali</label>
+      <input id="importAudio" type="file" accept="audio/*,.mp3,.m4a,.aac,.wav,.ogg,.flac,.opus" multiple hidden />
+    </div>`;
+  $('#importAudio').onchange = async e => { const n = await importFiles(e.target.files); if (n) { toast(`${n} brani salvati sul dispositivo`); renderMusicLibrary(); } };
+}
+
+function renderTrackList({ kind, title, sub, image, tracks, meta, removable = false, extra = '' }) {
+  view().innerHTML = `
+    <div class="detail-head">
+      ${coverHtml(image, title)}
+      <div><span class="kind">${esc(kind)}</span><h1>${esc(title)}</h1><p>${esc(sub || '')}${tracks.length ? ' · ' + tracks.length + ' brani' : ''}</p></div>
+    </div>
+    <div class="detail-actions">
+      <button class="play-btn xl" type="button" id="listPlay" aria-label="Riproduci tutto" ${tracks.length ? '' : 'disabled'}><svg viewBox="0 0 24 24"><path d="M8 5l11 7-11 7z" class="fill"/></svg></button>
+      ${tracks.length > 1 ? '<button class="btn ghost small" type="button" id="listShuffle">Casuale</button>' : ''}
+      ${extra}
+    </div>
+    ${musicRowsHtml(tracks, { removable })}`;
+  setTracks(tracks, meta);
+  const p = $('#listPlay');
+  if (p) p.onclick = () => engine.playList(tracks, 0, meta);
+  const s = $('#listShuffle');
+  if (s) s.onclick = () => { if (!engine.shuffle) engine.toggleShuffle(); engine.playList(tracks, Math.floor(Math.random() * tracks.length), meta); };
+  ui.renderPlayer();
+}
+
+function renderMyPlaylist(id) {
+  setActiveNav('');
+  ++renderToken;
+  const p = music.playlist(id);
+  if (!p) { view().innerHTML = '<div class="empty">Playlist non trovata.</div>'; return; }
+  renderTrackList({
+    kind: 'La mia playlist', title: p.name, sub: 'Salvata su questo dispositivo',
+    image: p.tracks.find(t => t.image)?.image || '', tracks: p.tracks, removable: true,
+    meta: { type: 'music', id: p.id, uri: 'music:mylist:' + p.id, name: p.name, sub: 'La mia playlist' },
+    extra: `<button class="btn ghost small" type="button" id="plRename">Rinomina</button><button class="btn danger small" type="button" id="plDelete">Elimina</button>`,
+  });
+  view()._playlistId = id;
+  $('#plRename').onclick = () => { const n = prompt('Nuovo nome della playlist', p.name); if (n && n.trim()) { music.updatePlaylist(id, { name: n.trim() }); renderMyPlaylist(id); } };
+  $('#plDelete').onclick = () => { if (confirm(`Eliminare la playlist «${p.name}»?`)) { music.deletePlaylist(id); location.hash = '#/library'; } };
+}
+
+async function renderAudiusPlaylist(id) {
+  setActiveNav('');
+  const tk = ++renderToken;
+  view().innerHTML = '<div class="skeleton" style="height:320px"></div>';
+  try {
+    const [info] = await audius(`/playlists/${encodeURIComponent(id)}`);
+    const tracks = playableAudius(await audius(`/playlists/${encodeURIComponent(id)}/tracks`));
+    if (tk !== renderToken) return;
+    renderTrackList({
+      kind: 'Playlist Audius', title: info?.playlist_name || 'Playlist', sub: info?.user?.name || '',
+      image: info?.artwork?.['480x480'] || tracks[0]?.image || '', tracks,
+      meta: { type: 'music', id, uri: 'music:apl:' + id, name: info?.playlist_name || 'Playlist', sub: 'Audius' },
+      extra: '<button class="btn ghost small" type="button" id="aplCopy">+ Salva nelle mie playlist</button>',
+    });
+    $('#aplCopy').onclick = () => { const p = music.createPlaylist(info?.playlist_name || 'Playlist', tracks.map(slimTrack)); toast('Salvata in «' + p.name + '»'); };
+  } catch (e) {
+    if (tk === renderToken) view().innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+  }
+}
+
+function renderLikes() {
+  setActiveNav('library');
+  ++renderToken;
+  renderTrackList({ kind: 'Playlist', title: 'Preferiti', sub: 'I brani col cuore', image: '', tracks: music.likes(), meta: { type: 'music', id: 'likes', uri: 'music:likes', name: 'Preferiti', sub: 'Playlist' } });
+}
+
+function renderFiles() {
+  setActiveNav('library');
+  ++renderToken;
+  renderTrackList({
+    kind: 'Sul dispositivo', title: 'I miei file', sub: 'Funzionano anche offline', image: '', tracks: fileStore.list(),
+    meta: { type: 'music', id: 'files', uri: 'music:files', name: 'I miei file', sub: 'Sul dispositivo' },
+    extra: '<label class="btn ghost small" for="importAudio2" style="cursor:pointer">+ Carica file</label><input id="importAudio2" type="file" accept="audio/*,.mp3,.m4a,.aac,.wav,.ogg,.flac,.opus" multiple hidden />',
+  });
+  $('#importAudio2').onchange = async e => { const n = await importFiles(e.target.files); if (n) { toast(`${n} brani salvati sul dispositivo`); renderFiles(); } };
+}
+
+// Menu "⋯" di un brano: aggiungi a playlist, preferito, elimina file
+function openTrackMenu(track) {
+  const dlg = $('#trackDialog');
+  const pls = music.playlists();
+  $('#trackDialogTitle').textContent = track.title;
+  $('#trackDialogBody').innerHTML = `
+    <p class="muted small">${esc(track.artist || '')}</p>
+    <h4 class="sheet-sub">Aggiungi a playlist</h4>
+    <ul class="devices">
+      ${pls.map(p => `<li><button type="button" data-add-to="${esc(p.id)}"><span><strong>${esc(p.name)}</strong><small>${p.tracks.length} brani</small></span></button></li>`).join('')}
+      <li><button type="button" data-add-new><span><strong>+ Nuova playlist</strong><small>Crea e aggiungi questo brano</small></span></button></li>
+    </ul>
+    <div class="detail-actions">
+      <button class="btn ghost small" type="button" data-play-next>Riproduci dopo</button>
+      ${track.link ? `<a class="btn ghost small" href="${esc(track.link)}" target="_blank" rel="noopener">Pagina dell'artista</a>` : ''}
+      ${track.src === 'file' ? '<button class="btn danger small" type="button" data-delete-file>Elimina dal dispositivo</button>' : ''}
+    </div>`;
+  dlg._track = track;
+  if (!dlg.open) dlg.showModal();
+}
+
+function handleTrackDialogClick(e) {
+  const dlg = $('#trackDialog');
+  const track = dlg._track;
+  if (!track) return false;
+  const add = e.target.closest('[data-add-to]');
+  if (add) { const ok = music.addTo(add.dataset.addTo, track); toast(ok ? 'Aggiunto alla playlist' : 'È già nella playlist'); dlg.close(); route(); return true; }
+  if (e.target.closest('[data-add-new]')) {
+    const n = prompt('Nome della nuova playlist', 'La mia playlist');
+    if (n && n.trim()) { music.createPlaylist(n.trim(), [slimTrack(track)]); toast('Playlist creata'); dlg.close(); route(); }
+    return true;
+  }
+  if (e.target.closest('[data-play-next]')) {
+    if (!engine.queue.length) engine.playList([track], 0);
+    else { engine.queue.splice(engine.index + 1, 0, track); engine.sync(); toast('Sarà il prossimo brano'); }
+    dlg.close();
+    return true;
+  }
+  if (e.target.closest('[data-delete-file]')) {
+    if (confirm('Eliminare questo file da Onda su questo dispositivo?')) { deleteFile(track.id).then(() => { toast('File eliminato'); route(); }); dlg.close(); }
+    return true;
+  }
+  return false;
+}
+
+// Click nelle liste della modalità gratuita. Ritorna true se l'ha gestito.
+function handleMusicClick(e) {
+  const t = e.target;
+  const tracks = view()._ftracks || [];
+  const like = t.closest('[data-like]');
+  if (like) {
+    const tr = tracks[+like.dataset.like];
+    if (tr) { const on = music.toggleLike(tr); like.classList.toggle('on', on); toast(on ? 'Aggiunto ai preferiti' : 'Tolto dai preferiti'); }
+    return true;
+  }
+  const more = t.closest('[data-more]');
+  if (more) { const tr = tracks[+more.dataset.more]; if (tr) openTrackMenu(tr); return true; }
+  const rm = t.closest('[data-remove]');
+  if (rm) {
+    const pid = view()._playlistId;
+    const p = pid && music.playlist(pid);
+    if (p) { music.updatePlaylist(pid, { tracks: p.tracks.filter((_, i) => i !== +rm.dataset.remove) }); renderMyPlaylist(pid); }
+    return true;
+  }
+  const row = t.closest('.row[data-fidx]');
+  if (row) { engine.playList(tracks, +row.dataset.fidx, view()._fmeta); return true; }
+  const plPlay = t.closest('[data-play-mylist]');
+  if (plPlay) {
+    e.stopPropagation();
+    const p = music.playlist(plPlay.dataset.playMylist);
+    if (p?.tracks.length) engine.playList(p.tracks, 0, { type: 'music', id: p.id, uri: 'music:mylist:' + p.id, name: p.name, sub: 'La mia playlist' });
+    else toast('La playlist è vuota.');
+    return true;
+  }
+  if (t.closest('[data-new-playlist]')) {
+    const n = prompt('Nome della nuova playlist', 'La mia playlist');
+    if (n && n.trim()) { const p = music.createPlaylist(n.trim()); location.hash = '#/mylist/' + p.id; }
+    return true;
+  }
+  return false;
+}
+
+// Link incollato o testo: Spotify → player ufficiale, Audius → si apre qui, altro → ricerca
+async function openMusicInput(value) {
+  const v = (value || '').trim();
+  if (!v) return;
+  const sp = parseSpotifyLink(v);
+  if (sp?.id) { location.hash = `#/${sp.type}/${sp.id}`; return; }
+  if (/audius\.co\//.test(v)) {
+    try {
+      const res = await fetch(`${AUDIUS}/resolve?app_name=${APP_NAME}&url=${encodeURIComponent(v)}`);
+      if (!res.ok) throw new Error();
+      const d = (await res.json()).data;
+      const item = Array.isArray(d) ? d[0] : d;
+      if (item?.playlist_name) { location.hash = '#/apl/' + item.id; return; }
+      if (item?.title) { const tr = fromAudius(item); engine.playList([tr], 0); return; }
+    } catch {}
+    return toast('Link Audius non riconosciuto.', true);
+  }
+  location.hash = '#/search/' + encodeURIComponent(v);
 }
 
 // ======================================================================
@@ -1179,12 +1855,20 @@ function route() {
   const parts = location.hash.replace(/^#\/?/, '').split('/');
   const [name, a, b] = parts;
   $('#view').scrollTop = 0;
+  if (isFree()) {
+    if (name === 'search') return renderMusicSearch(a ? decodeURIComponent(a) : '');
+    if (name === 'library') return renderMusicLibrary();
+    if (name === 'mylist' && a) return renderMyPlaylist(a);
+    if (name === 'apl' && a) return renderAudiusPlaylist(a);
+    if (name === 'likes') return renderLikes();
+    if (name === 'files') return renderFiles();
+  }
   if (name === 'search') return renderSearch(a ? decodeURIComponent(a) : '');
   if (name === 'library') return renderLibrary();
   if (name === 'settings') return renderSettings();
   if (['playlist', 'album', 'artist', 'track', 'liked', 'show', 'episode'].includes(name) && a) return renderDetail(name, a);
   if (name === 'open' && a) { const l = parseSpotifyLink(decodeURIComponent(a + (b ? '/' + b : ''))); if (l?.id) { location.replace(`#/${l.type}/${l.id}`); return; } }
-  return renderHome();
+  return isFree() ? renderMusicHome() : renderHome();
 }
 
 function openLink(value) {
@@ -1201,16 +1885,25 @@ function openLink(value) {
 function bindGlobal() {
   window.addEventListener('hashchange', route);
 
-  $('#linkForm').addEventListener('submit', e => { e.preventDefault(); openLink($('#linkInput').value); $('#linkInput').value = ''; $('#linkInput').blur(); });
+  $('#linkForm').addEventListener('submit', e => {
+    e.preventDefault();
+    const v = $('#linkInput').value;
+    if (isFree()) openMusicInput(v); else openLink(v);
+    $('#linkInput').value = '';
+    $('#linkInput').blur();
+  });
   // incollare un link lo apre subito
   $('#linkInput').addEventListener('paste', () => setTimeout(() => { const v = $('#linkInput').value; if (parseSpotifyLink(v)?.id) { openLink(v); $('#linkInput').value = ''; } }, 0));
 
   document.addEventListener('submit', e => {
     if (e.target.id === 'heroLink') { e.preventDefault(); openLink($('#heroInput').value); }
+    if (e.target.id === 'musicSearchHero') { e.preventDefault(); openMusicInput($('#musicHeroInput').value); }
+    if (e.target.id === 'musicSearchForm') { e.preventDefault(); openMusicInput($('#musicSearchInput').value); }
   });
 
   document.addEventListener('click', e => {
     const t = e.target;
+    if (isFree() && (handleTrackDialogClick(e) || handleMusicClick(e))) return;
 
     const act = t.closest('[data-act]');
     if (act) {
@@ -1243,7 +1936,7 @@ function bindGlobal() {
     if (row) { playRow(row); return; }
 
     const clr = t.closest('[data-clear]');
-    if (clr) { store.set(clr.dataset.clear, []); renderHome(); return; }
+    if (clr) { store.set(clr.dataset.clear, []); route(); return; }
 
     const dev = t.closest('[data-device]');
     if (dev) { player.transfer(dev.dataset.device).then(ok => ok && $('#devicesDialog').close()); return; }
@@ -1263,7 +1956,7 @@ function bindGlobal() {
       e.target.click();
     }
     if (e.key === 'Escape' && !$('#nowPlaying').hidden) $('#nowPlaying').hidden = true;
-    if (e.code === 'Space' && !isFree() && !e.target.matches('input, textarea, button, [role="button"], [role="link"]')) { e.preventDefault(); player.toggle(); }
+    if (e.code === 'Space' && !e.target.matches('input, textarea, button, [role="button"], [role="link"]')) { e.preventDefault(); player.toggle(); }
   });
 
   // chiudi il dialog toccando lo sfondo
@@ -1332,7 +2025,9 @@ let globalBound = false;
 function bootFree() {
   show('app');
   document.body.classList.add('free');
-  if (!globalBound) { bindGlobal(); globalBound = true; }
+  if (!globalBound) { bindGlobal(); mediaSession.init(); globalBound = true; }
+  useEngineForPlayer();
+  $('#linkInput').placeholder = 'Cerca una canzone o incolla un link';
   const last = store.get('freeCurrent');
   if (last?.uri && !freePlayer.current) freePlayer.load(last, { expand: false, remember: false });
   route();

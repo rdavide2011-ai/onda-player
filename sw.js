@@ -1,6 +1,6 @@
 // Service worker di Onda: rende l'interfaccia disponibile offline.
 // Le chiamate a Spotify (API, SDK, login) non vengono mai messe in cache.
-const CACHE = 'onda-v2';
+const CACHE = 'onda-v3';
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', e => {

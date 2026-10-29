@@ -6,7 +6,12 @@ Non c'è un backend: il login usa OAuth PKCE direttamente dal browser, e salvati
 
 > Serve Spotify Premium. È l'unico modo ufficiale per riprodurre l'audio di Spotify da un sito esterno (Web Playback SDK e i comandi del player della Web API funzionano solo con Premium), ed è per questo che non ci sono pubblicità.
 
-## Funzioni
+## Due modalità
+
+- **Gratuita (senza Premium)**: il player di Onda riproduce musica gratuita e legale dal catalogo di [Audius](https://audius.co) e i file musicali che carichi tu (salvati sul dispositivo con IndexedDB, ascoltabili offline). Playlist, preferiti e coda restano in `localStorage`. Nessuna pubblicità e nessuna configurazione. I link Spotify si aprono nel player ufficiale incorporato di Spotify.
+- **Premium**: login Spotify e riproduzione delle tue playlist Spotify (descritta sotto).
+
+## Funzioni (modalità Premium)
 
 - Login con Spotify (PKCE, nessun client secret) e rinnovo automatico del token
 - Apri un link `open.spotify.com/...` o `spotify:...` di playlist, album, brano o artista; incollandolo nella barra si apre subito

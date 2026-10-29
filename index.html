@@ -40,7 +40,7 @@
       <p class="note">Questa modalità richiede <b>Spotify Premium</b>: è l'unico modo ufficiale per riprodurre musica da un sito esterno senza pubblicità.</p>
       <div class="free-choice">
         <strong>Non hai Premium?</strong>
-        <p class="muted small">Usa la modalità gratuita: incolli il link della playlist e la ascolti con il player ufficiale di Spotify. Nessuna configurazione.</p>
+        <p class="muted small">Usa la modalità gratuita: il player di Onda con musica gratuita e legale (catalogo Audius), i tuoi file musicali e le tue playlist, senza pubblicità. Nessuna configurazione.</p>
         <button class="btn ghost wide" id="useFree" type="button">Usa la modalità gratuita</button>
       </div>
     </div>
@@ -146,6 +146,12 @@
       </div>
       <iframe id="fpFrame" title="Player Spotify" allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture" loading="lazy"></iframe>
     </section>
+
+    <!-- Menu di un brano (modalità gratuita) -->
+    <dialog id="trackDialog" class="sheet">
+      <div class="sheet-head"><h3 id="trackDialogTitle">Brano</h3><button class="icon-btn" data-close type="button" aria-label="Chiudi"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg></button></div>
+      <div id="trackDialogBody"></div>
+    </dialog>
 
     <!-- Selettore dispositivi -->
     <dialog id="devicesDialog" class="sheet">
