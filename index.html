@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Onda Player</title>
+  <meta name="description" content="Player personale per Spotify Premium: le tue playlist, link e cronologia salvati sul dispositivo." />
+  <meta name="theme-color" content="#0c0b12" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Onda" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" type="image/svg+xml" href="icons/icon.svg" />
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- Schermata di configurazione (primo avvio) -->
+  <section id="setup" class="screen" hidden>
+    <div class="setup-card">
+      <div class="brand"><img src="icons/icon.svg" alt="" width="44" height="44" /><span>Onda</span></div>
+      <h1>Collega la tua app Spotify</h1>
+      <p class="muted">Serve una sola volta. I dati restano salvati su questo dispositivo.</p>
+      <ol class="steps">
+        <li>Apri <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">developer.spotify.com/dashboard</a> e crea un'app (spunta <b>Web API</b> e <b>Web Playback SDK</b>).</li>
+        <li>In <b>Redirect URIs</b> incolla esattamente questo indirizzo:
+          <div class="copy-row"><code id="redirectUri"></code><button class="btn small ghost" id="copyRedirect" type="button">Copia</button></div>
+        </li>
+        <li>Copia il <b>Client ID</b> dell'app e incollalo qui sotto.</li>
+      </ol>
+      <form id="setupForm" class="field-row">
+        <label for="clientIdInput" class="sr-only">Client ID</label>
+        <input id="clientIdInput" type="text" placeholder="Client ID (32 caratteri)" autocomplete="off" spellcheck="false" required />
+        <button class="btn primary" type="submit">Salva</button>
+      </form>
+      <p class="note">Serve un account <b>Spotify Premium</b>: è l'unico modo ufficiale per riprodurre musica da un sito esterno, ed è anche il motivo per cui qui non ci sono pubblicità.</p>
+    </div>
+  </section>
+
+  <!-- Schermata di accesso -->
+  <section id="login" class="screen" hidden>
+    <div class="setup-card center">
+      <div class="brand big"><img src="icons/icon.svg" alt="" width="64" height="64" /><span>Onda</span></div>
+      <h1>Le tue playlist, ovunque</h1>
+      <p class="muted">Accedi con il tuo account Spotify Premium.</p>
+      <button class="btn primary wide" id="loginBtn" type="button">Accedi con Spotify</button>
+      <button class="btn ghost small" id="editClientId" type="button">Cambia Client ID</button>
+      <p class="error" id="loginError" hidden></p>
+    </div>
+  </section>
+
+  <!-- App -->
+  <div id="app" hidden>
+    <header class="topbar">
+      <a href="#/home" class="brand"><img src="icons/icon.svg" alt="" width="30" height="30" /><span>Onda</span></a>
+      <form id="linkForm" class="link-form" autocomplete="off">
+        <label for="linkInput" class="sr-only">Link Spotify</label>
+        <input id="linkInput" type="text" inputmode="url" placeholder="Incolla un link di playlist, album o brano" />
+        <button class="btn primary small" type="submit">Apri</button>
+      </form>
+      <button class="icon-btn" id="devicesBtn" type="button" aria-label="Dispositivi" title="Dispositivi">
+        <svg viewBox="0 0 24 24"><path d="M4 6h11v9H4zM17 8h3v10h-3zM7 18h5" /></svg>
+      </button>
+    </header>
+
+    <nav class="sidenav" aria-label="Navigazione">
+      <a href="#/home" data-nav="home"><svg viewBox="0 0 24 24"><path d="M3 11l9-7 9 7v9h-6v-6H9v6H3z" /></svg><span>Home</span></a>
+      <a href="#/search" data-nav="search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5" /><path d="M16 16l5 5" /></svg><span>Cerca</span></a>
+      <a href="#/library" data-nav="library"><svg viewBox="0 0 24 24"><path d="M4 4v16M9 4v16M14 5l5 15" /></svg><span>Libreria</span></a>
+      <a href="#/settings" data-nav="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1" /></svg><span>Impostazioni</span></a>
+    </nav>
+
+    <main id="view" tabindex="-1"></main>
+
+    <!-- Mini player -->
+    <footer id="player" class="player">
+      <button class="np-open" id="npOpen" type="button" aria-label="Apri brano in riproduzione">
+        <img id="pCover" alt="" />
+        <div class="np-text"><strong id="pTitle">Niente in riproduzione</strong><span id="pArtist">Scegli una playlist</span></div>
+      </button>
+      <div class="p-center">
+        <div class="p-controls">
+          <button class="icon-btn sm" data-act="shuffle" aria-label="Casuale" title="Casuale"><svg viewBox="0 0 24 24"><path d="M3 7h4l10 10h4M3 17h4l3-3M14 10l3-3h4M18 4l3 3-3 3M18 14l3 3-3 3" /></svg></button>
+          <button class="icon-btn" data-act="prev" aria-label="Precedente"><svg viewBox="0 0 24 24"><path d="M6 5v14M19 5l-10 7 10 7z" class="fill" /></svg></button>
+          <button class="play-btn" data-act="toggle" aria-label="Riproduci/Pausa"><svg viewBox="0 0 24 24" class="i-play"><path d="M8 5l11 7-11 7z" class="fill" /></svg><svg viewBox="0 0 24 24" class="i-pause"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" class="fill" /></svg></button>
+          <button class="icon-btn" data-act="next" aria-label="Successivo"><svg viewBox="0 0 24 24"><path d="M18 5v14M5 5l10 7-10 7z" class="fill" /></svg></button>
+          <button class="icon-btn sm" data-act="repeat" aria-label="Ripeti" title="Ripeti"><svg viewBox="0 0 24 24"><path d="M4 11V8a2 2 0 012-2h13l-3-3M20 13v3a2 2 0 01-2 2H5l3 3" /></svg><i class="rep1">1</i></button>
+        </div>
+        <div class="p-progress">
+          <span id="pTime">0:00</span>
+          <input type="range" id="pSeek" min="0" max="1000" value="0" aria-label="Posizione brano" />
+          <span id="pDur">0:00</span>
+        </div>
+      </div>
+      <div class="p-right">
+        <span class="device-pill" id="pDevice" title="Dispositivo in uso"></span>
+        <input type="range" id="pVol" min="0" max="100" value="70" aria-label="Volume" />
+      </div>
+    </footer>
+
+    <!-- Now playing a schermo intero (mobile) -->
+    <section id="nowPlaying" class="np-full" hidden aria-label="In riproduzione">
+      <div class="np-bg" id="npBg"></div>
+      <div class="np-inner">
+        <div class="np-head">
+          <button class="icon-btn" id="npClose" type="button" aria-label="Chiudi"><svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6" /></svg></button>
+          <span id="npContext" class="muted small">In riproduzione</span>
+          <button class="icon-btn" data-open-devices type="button" aria-label="Dispositivi"><svg viewBox="0 0 24 24"><path d="M4 6h11v9H4zM17 8h3v10h-3zM7 18h5" /></svg></button>
+        </div>
+        <img id="npCover" class="np-cover" alt="" />
+        <div class="np-meta"><h2 id="npTitle">—</h2><p id="npArtist" class="muted">—</p></div>
+        <div class="p-progress big">
+          <span id="npTime">0:00</span>
+          <input type="range" id="npSeek" min="0" max="1000" value="0" aria-label="Posizione brano" />
+          <span id="npDur">0:00</span>
+        </div>
+        <div class="p-controls big">
+          <button class="icon-btn" data-act="shuffle" aria-label="Casuale"><svg viewBox="0 0 24 24"><path d="M3 7h4l10 10h4M3 17h4l3-3M14 10l3-3h4M18 4l3 3-3 3M18 14l3 3-3 3" /></svg></button>
+          <button class="icon-btn lg" data-act="prev" aria-label="Precedente"><svg viewBox="0 0 24 24"><path d="M6 5v14M19 5l-10 7 10 7z" class="fill" /></svg></button>
+          <button class="play-btn xl" data-act="toggle" aria-label="Riproduci/Pausa"><svg viewBox="0 0 24 24" class="i-play"><path d="M8 5l11 7-11 7z" class="fill" /></svg><svg viewBox="0 0 24 24" class="i-pause"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" class="fill" /></svg></button>
+          <button class="icon-btn lg" data-act="next" aria-label="Successivo"><svg viewBox="0 0 24 24"><path d="M18 5v14M5 5l10 7-10 7z" class="fill" /></svg></button>
+          <button class="icon-btn" data-act="repeat" aria-label="Ripeti"><svg viewBox="0 0 24 24"><path d="M4 11V8a2 2 0 012-2h13l-3-3M20 13v3a2 2 0 01-2 2H5l3 3" /></svg><i class="rep1">1</i></button>
+        </div>
+        <div class="np-vol">
+          <svg viewBox="0 0 24 24"><path d="M4 9h4l5-4v14l-5-4H4z" /></svg>
+          <input type="range" id="npVol" min="0" max="100" value="70" aria-label="Volume" />
+        </div>
+      </div>
+    </section>
+
+    <!-- Selettore dispositivi -->
+    <dialog id="devicesDialog" class="sheet">
+      <div class="sheet-head"><h3>Riproduci su</h3><button class="icon-btn" data-close type="button" aria-label="Chiudi"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg></button></div>
+      <p class="muted small">Se il browser non riesce a suonare (succede su alcuni iPhone), apri l'app Spotify sul telefono e sceglila qui: Onda la controlla a distanza.</p>
+      <ul id="devicesList" class="devices"></ul>
+      <button class="btn ghost small" id="refreshDevices" type="button">Aggiorna</button>
+    </dialog>
+
+    <nav class="bottomnav" aria-label="Navigazione">
+      <a href="#/home" data-nav="home"><svg viewBox="0 0 24 24"><path d="M3 11l9-7 9 7v9h-6v-6H9v6H3z" /></svg><span>Home</span></a>
+      <a href="#/search" data-nav="search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5" /><path d="M16 16l5 5" /></svg><span>Cerca</span></a>
+      <a href="#/library" data-nav="library"><svg viewBox="0 0 24 24"><path d="M4 4v16M9 4v16M14 5l5 15" /></svg><span>Libreria</span></a>
+      <a href="#/settings" data-nav="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1" /></svg><span>Opzioni</span></a>
+    </nav>
+  </div>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <script src="app.js" type="module"></script>
+</body>
+</html>
