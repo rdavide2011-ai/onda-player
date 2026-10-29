@@ -37,7 +37,12 @@
         <input id="clientIdInput" type="text" placeholder="Client ID (32 caratteri)" autocomplete="off" spellcheck="false" required />
         <button class="btn primary" type="submit">Salva</button>
       </form>
-      <p class="note">Serve un account <b>Spotify Premium</b>: è l'unico modo ufficiale per riprodurre musica da un sito esterno, ed è anche il motivo per cui qui non ci sono pubblicità.</p>
+      <p class="note">Questa modalità richiede <b>Spotify Premium</b>: è l'unico modo ufficiale per riprodurre musica da un sito esterno senza pubblicità.</p>
+      <div class="free-choice">
+        <strong>Non hai Premium?</strong>
+        <p class="muted small">Usa la modalità gratuita: incolli il link della playlist e la ascolti con il player ufficiale di Spotify. Nessuna configurazione.</p>
+        <button class="btn ghost wide" id="useFree" type="button">Usa la modalità gratuita</button>
+      </div>
     </div>
   </section>
 
@@ -130,6 +135,16 @@
           <input type="range" id="npVol" min="0" max="100" value="70" aria-label="Volume" />
         </div>
       </div>
+    </section>
+
+    <!-- Player modalità gratuita (embed ufficiale Spotify, resta attivo cambiando pagina) -->
+    <section id="freePlayer" class="free-player" hidden aria-label="Player Spotify">
+      <div class="fp-bar">
+        <span id="fpTitle" class="fp-title">In riproduzione</span>
+        <button class="icon-btn sm" id="fpToggle" type="button" aria-label="Riduci o espandi il player"><svg viewBox="0 0 24 24"><path d="M6 15l6-6 6 6" /></svg></button>
+        <button class="icon-btn sm" id="fpClose" type="button" aria-label="Chiudi il player"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg></button>
+      </div>
+      <iframe id="fpFrame" title="Player Spotify" allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture" loading="lazy"></iframe>
     </section>
 
     <!-- Selettore dispositivi -->

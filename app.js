@@ -83,6 +83,8 @@ const SCOPES = [
 
 const REDIRECT_URI = (location.origin + location.pathname).replace(/index\.html$/, '');
 const API = 'https://api.spotify.com/v1';
+// Modalità gratuita: niente login né app sviluppatore, si usa il player ufficiale incorporato di Spotify
+const isFree = () => store.get('mode', '') === 'free';
 
 // ======================================================================
 // Auth — Authorization Code con PKCE (nessun client secret)
@@ -678,6 +680,67 @@ const mediaSession = {
 };
 
 // ======================================================================
+// Player della modalità gratuita (embed ufficiale di Spotify)
+// ======================================================================
+const freePlayer = {
+  current: null,
+
+  // Titolo e copertina dal servizio pubblico oEmbed di Spotify (non serve login)
+  async meta(type, id) {
+    const key = 'oembed:' + type + ':' + id;
+    const cached = lib.cache.get(key, 7 * 24 * 3600 * 1000);
+    if (cached) return cached;
+    try {
+      const r = await fetch('https://open.spotify.com/oembed?url=' + encodeURIComponent(`https://open.spotify.com/${type}/${id}`));
+      if (!r.ok) throw new Error();
+      const j = await r.json();
+      const m = { name: j.title || '', image: j.thumbnail_url || '' };
+      lib.cache.set(key, m);
+      return m;
+    } catch {
+      return { name: '', image: '' };
+    }
+  },
+
+  load(entry, { expand = true, remember = true } = {}) {
+    const box = $('#freePlayer');
+    if (this.current?.uri !== entry.uri) {
+      $('#fpFrame').src = `https://open.spotify.com/embed/${entry.type}/${entry.id}?utm_source=oembed&theme=0`;
+    }
+    this.current = entry;
+    $('#fpTitle').textContent = entry.name || 'In riproduzione';
+    box.hidden = false;
+    box.classList.toggle('compact', !expand);
+    if (remember) lib.addRecent(entry);
+    store.set('freeCurrent', entry);
+    this.updatePad();
+  },
+
+  toggle() {
+    $('#freePlayer').classList.toggle('compact');
+    this.updatePad();
+  },
+
+  close() {
+    $('#fpFrame').src = 'about:blank';
+    this.current = null;
+    $('#freePlayer').hidden = true;
+    store.remove('freeCurrent');
+    this.updatePad();
+  },
+
+  // spazio in fondo alla pagina per non coprire i contenuti col player
+  updatePad() {
+    const set = () => {
+      const box = $('#freePlayer');
+      document.body.style.setProperty('--fp-h', box.hidden ? '0px' : box.offsetHeight + 'px');
+    };
+    set();
+    setTimeout(set, 300);
+  },
+};
+
+// ======================================================================
 // Viste
 // ======================================================================
 const view = () => $('#view');
@@ -758,12 +821,12 @@ async function renderHome() {
       <div class="grid">${recent.slice(0, 12).map(tileHtml).join('')}</div>
     </section>` : ''}
 
-    <section class="section">
+    ${isFree() ? '' : `<section class="section">
       <div class="section-head"><h2>Le tue playlist</h2><a href="#/library">Tutte</a></div>
       <div id="homePlaylists" class="grid">${'<div class="skeleton" style="aspect-ratio:.8"></div>'.repeat(4)}</div>
-    </section>
+    </section>`}
 
-    ${history.length ? `<section class="section">
+    ${!isFree() && history.length ? `<section class="section">
       <div class="section-head"><h2>Cronologia brani</h2><button type="button" data-clear="history">Cancella</button></div>
       <div class="row-list">${history.map((t, i) => `
         <div class="row" data-uri="${esc(t.uri)}" data-single="1" tabindex="0" role="button">
@@ -775,6 +838,7 @@ async function renderHome() {
     </section>` : ''}
   `;
 
+  if (isFree()) return;
   try {
     const playlists = await getMyPlaylists();
     if (tk !== renderToken) return;
@@ -877,7 +941,45 @@ async function doSearch(q, offset) {
 }
 
 // ---------- Dettaglio: playlist / album / artista / brano / preferiti ----------
+async function renderFreeDetail(type, id) {
+  setActiveNav('');
+  const tk = ++renderToken;
+  const kinds = { playlist: 'Playlist', album: 'Album', track: 'Brano', artist: 'Artista', show: 'Podcast', episode: 'Episodio' };
+  if (!kinds[type]) { view().innerHTML = '<div class="empty">Link non supportato.</div>'; return; }
+  view().innerHTML = `
+    <div class="detail-head"><div class="cover skeleton"></div><div style="flex:1"><div class="skeleton" style="height:16px;width:80px"></div><div class="skeleton" style="height:42px;width:70%;margin:10px 0"></div></div></div>`;
+  const m = await freePlayer.meta(type, id);
+  if (tk !== renderToken) return;
+  const entry = { type, id, uri: `spotify:${type}:${id}`, name: m.name || kinds[type], image: m.image, sub: kinds[type] };
+  const saved = lib.isSaved(entry.uri);
+  view().innerHTML = `
+    <div class="detail-head">
+      ${coverHtml(entry.image, entry.name)}
+      <div><span class="kind">${esc(kinds[type])}</span><h1>${esc(entry.name)}</h1><p>Si ascolta con il player ufficiale di Spotify.</p></div>
+    </div>
+    <div class="detail-actions">
+      <button class="play-btn xl" type="button" id="detailPlay" aria-label="Apri nel player"><svg viewBox="0 0 24 24"><path d="M8 5l11 7-11 7z" class="fill"/></svg></button>
+      <button class="btn ghost small" type="button" id="detailSave">${saved ? '✓ Salvato' : '+ Salva'}</button>
+      <button class="btn ghost small" type="button" id="detailShare">Copia link</button>
+      <a class="btn ghost small" href="https://open.spotify.com/${esc(type)}/${esc(id)}" target="_blank" rel="noopener">Apri in Spotify</a>
+    </div>
+    <p class="free-hint">Per i brani interi devi aver fatto l'accesso a Spotify in questo browser (open.spotify.com). Senza accesso Spotify fa sentire solo anteprime di 30 secondi.</p>`;
+
+  freePlayer.load(entry);
+  $('#detailPlay').onclick = () => freePlayer.load(entry);
+  $('#detailSave').onclick = () => {
+    const now = lib.toggleSaved(entry);
+    $('#detailSave').textContent = now ? '✓ Salvato' : '+ Salva';
+    toast(now ? 'Salvato su questo dispositivo' : 'Rimosso dai salvati');
+  };
+  $('#detailShare').onclick = async () => {
+    const link = `https://open.spotify.com/${type}/${id}`;
+    try { await navigator.clipboard.writeText(link); toast('Link copiato'); } catch { prompt('Copia il link', link); }
+  };
+}
+
 async function renderDetail(type, id) {
+  if (isFree()) return renderFreeDetail(type, id);
   setActiveNav('');
   const tk = ++renderToken;
   view().innerHTML = `
@@ -997,20 +1099,25 @@ function renderSettings() {
   setActiveNav('settings');
   ++renderToken;
   const me = store.get('me');
+  const free = isFree();
   view().innerHTML = `
     <h1 class="view-title">Impostazioni</h1>
     <div class="settings-list">
-      <div class="setting">
+      ${free ? `<div class="setting">
+        <h3>Modalità gratuita</h3>
+        <p>Ascolti con il player ufficiale di Spotify incorporato: non serve Premium né un'app sviluppatore. Con un account gratuito Spotify può mostrare le sue pubblicità e alcuni limiti di riproduzione.</p>
+        <div class="actions"><button class="btn ghost small" type="button" id="toPremium">Ho Premium: passa alla modalità Premium</button></div>
+      </div>` : `<div class="setting">
         <h3>Account</h3>
         <div class="user-chip">${me?.images?.[0]?.url ? `<img src="${esc(me.images[0].url)}" alt="" />` : '<div class="cover-fallback" style="width:44px;height:44px;border-radius:50%">' + esc((me?.display_name || '?')[0]) + '</div>'}
           <div><strong>${esc(me?.display_name || 'Utente Spotify')}</strong><p>${esc(me?.id || '')}</p></div></div>
-        <div class="actions"><button class="btn ghost small" type="button" id="logoutBtn">Esci</button></div>
+        <div class="actions"><button class="btn ghost small" type="button" id="logoutBtn">Esci</button><button class="btn ghost small" type="button" id="toFree">Usa la modalità gratuita</button></div>
       </div>
       <div class="setting">
         <h3>Player</h3>
         <p>${player.sdkReady ? 'Il browser è pronto per riprodurre musica.' : esc(player.sdkError || 'Il player del browser si sta avviando…')}</p>
         <div class="actions"><button class="btn ghost small" type="button" data-open-devices>Scegli dispositivo</button></div>
-      </div>
+      </div>`}
       <div class="setting">
         <h3>Dati salvati sul dispositivo</h3>
         <p>${lib.saved().length} salvati · ${lib.recent().length} recenti · ${lib.history().length} brani in cronologia. Il login resta su questo dispositivo e non viene esportato.</p>
@@ -1021,18 +1128,21 @@ function renderSettings() {
           <button class="btn danger small" type="button" id="wipeBtn">Cancella tutto</button>
         </div>
       </div>
-      <div class="setting">
+      ${free ? '' : `<div class="setting">
         <h3>App Spotify collegata</h3>
         <p>Client ID: <code>${esc(auth.clientId)}</code><br>Redirect URI: <code>${esc(REDIRECT_URI)}</code></p>
         <div class="actions"><button class="btn ghost small" type="button" id="changeClient">Cambia Client ID</button></div>
-      </div>
+      </div>`}
       <div class="setting">
         <h3>Installa sul telefono</h3>
         <p>iPhone: Safari → Condividi → «Aggiungi alla schermata Home». Android: Chrome → menu ⋮ → «Installa app».</p>
       </div>
     </div>`;
 
-  $('#logoutBtn').onclick = () => { player.sdk?.disconnect(); auth.logout(); location.hash = ''; boot(); };
+  const on = (sel, fn) => { const el = $(sel); if (el) el.onclick = fn; };
+  on('#logoutBtn', () => { player.sdk?.disconnect(); auth.logout(); location.hash = ''; boot(); });
+  on('#toFree', () => { player.sdk?.disconnect(); store.set('mode', 'free'); location.hash = ''; location.reload(); });
+  on('#toPremium', () => { freePlayer.close(); store.remove('mode'); document.body.classList.remove('free'); location.hash = ''; boot(); });
   $('#exportBtn').onclick = () => {
     const blob = new Blob([JSON.stringify({ app: 'onda', version: 1, data: store.exportAll() }, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');
@@ -1059,7 +1169,7 @@ function renderSettings() {
     location.hash = '';
     location.reload();
   };
-  $('#changeClient').onclick = () => { auth.logout(); store.remove('clientId'); boot(); };
+  on('#changeClient', () => { auth.logout(); store.remove('clientId'); boot(); });
 }
 
 // ======================================================================
@@ -1072,7 +1182,7 @@ function route() {
   if (name === 'search') return renderSearch(a ? decodeURIComponent(a) : '');
   if (name === 'library') return renderLibrary();
   if (name === 'settings') return renderSettings();
-  if (['playlist', 'album', 'artist', 'track', 'liked'].includes(name) && a) return renderDetail(name, a);
+  if (['playlist', 'album', 'artist', 'track', 'liked', 'show', 'episode'].includes(name) && a) return renderDetail(name, a);
   if (name === 'open' && a) { const l = parseSpotifyLink(decodeURIComponent(a + (b ? '/' + b : ''))); if (l?.id) { location.replace(`#/${l.type}/${l.id}`); return; } }
   return renderHome();
 }
@@ -1081,7 +1191,7 @@ function openLink(value) {
   const l = parseSpotifyLink(value);
   if (!l) return toast('Link non riconosciuto. Usa un link open.spotify.com di playlist, album, brano o artista.', true);
   if (l.short) return toast('I link brevi spotify.link non si possono leggere: aprilo nel browser e copia l\'indirizzo completo open.spotify.com.', true);
-  if (l.type === 'show' || l.type === 'episode') return toast('Podcast non ancora supportati.', true);
+  if ((l.type === 'show' || l.type === 'episode') && !isFree()) return toast('Podcast non ancora supportati.', true);
   location.hash = `#/${l.type}/${l.id}`;
 }
 
@@ -1120,6 +1230,7 @@ function bindGlobal() {
       const [type, id] = tile.dataset.open.split('/');
       const entry = lib.saved().concat(lib.recent()).find(x => x.uri === playBtn.dataset.playUri) || { type, id, uri: playBtn.dataset.playUri, name: tile.querySelector('strong')?.textContent || '', sub: tile.querySelector('span')?.textContent || '', image: tile.querySelector('img')?.src || '' };
       if (type === 'liked') { location.hash = '#/liked/me'; return; }
+      if (isFree()) { freePlayer.load(entry); return; }
       if (type === 'track') player.play({ uris: [entry.uri], meta: entry });
       else player.play({ contextUri: entry.uri, meta: entry });
       return;
@@ -1140,6 +1251,8 @@ function bindGlobal() {
     if (t.closest('[data-open-devices]') || t.closest('#devicesBtn')) { ui.openDevices(); return; }
     if (t.closest('#refreshDevices')) { ui.openDevices(); return; }
     if (t.closest('[data-close]')) { t.closest('dialog').close(); return; }
+    if (t.closest('#fpToggle')) { freePlayer.toggle(); return; }
+    if (t.closest('#fpClose')) { freePlayer.close(); return; }
     if (t.closest('#npOpen')) { $('#nowPlaying').hidden = false; return; }
     if (t.closest('#npClose')) { $('#nowPlaying').hidden = true; return; }
   });
@@ -1150,7 +1263,7 @@ function bindGlobal() {
       e.target.click();
     }
     if (e.key === 'Escape' && !$('#nowPlaying').hidden) $('#nowPlaying').hidden = true;
-    if (e.code === 'Space' && !e.target.matches('input, textarea, button, [role="button"], [role="link"]')) { e.preventDefault(); player.toggle(); }
+    if (e.code === 'Space' && !isFree() && !e.target.matches('input, textarea, button, [role="button"], [role="link"]')) { e.preventDefault(); player.toggle(); }
   });
 
   // chiudi il dialog toccando lo sfondo
@@ -1216,10 +1329,23 @@ function show(id) {
 
 let globalBound = false;
 
+function bootFree() {
+  show('app');
+  document.body.classList.add('free');
+  if (!globalBound) { bindGlobal(); globalBound = true; }
+  const last = store.get('freeCurrent');
+  if (last?.uri && !freePlayer.current) freePlayer.load(last, { expand: false, remember: false });
+  route();
+}
+
 async function boot() {
+  // 0) Modalità gratuita: nessuna configurazione
+  if (isFree()) return bootFree();
+
   // 1) Client ID mancante → configurazione
   if (!auth.clientId) {
     show('setup');
+    $('#useFree').onclick = () => { store.set('mode', 'free'); boot(); };
     $('#redirectUri').textContent = REDIRECT_URI;
     $('#copyRedirect').onclick = async () => {
       try { await navigator.clipboard.writeText(REDIRECT_URI); toast('Copiato'); } catch { prompt('Copia questo indirizzo', REDIRECT_URI); }

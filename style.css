@@ -246,6 +246,24 @@ input[type="range"]:hover { background: linear-gradient(to right, var(--accent) 
 .toast.err { border-color: #6b2537; background: #2b1520; }
 @keyframes tin { from { opacity: 0; transform: translateY(8px); } }
 
+/* ---------- Modalità gratuita ---------- */
+.free-choice { margin-top: 22px; padding-top: 20px; border-top: 1px solid var(--line); display: grid; gap: 8px; }
+.free-choice p { margin: 0 0 6px; }
+body.free #player, body.free [data-nav="search"], body.free [data-nav="library"], body.free #devicesBtn { display: none !important; }
+body.free .bottomnav { grid-template-columns: repeat(2, 1fr); }
+body.free #view { padding-bottom: calc(var(--fp-h, 0px) + 40px); }
+.free-player {
+  position: fixed; right: 20px; bottom: 20px; z-index: 30; width: min(420px, calc(100% - 260px));
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 18px; overflow: hidden;
+  box-shadow: 0 24px 60px -20px #000; display: flex; flex-direction: column;
+}
+.fp-bar { display: flex; align-items: center; gap: 4px; padding: 6px 6px 6px 14px; }
+.fp-title { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.free-player iframe { display: block; width: 100%; height: 480px; border: 0; transition: height .25s ease; }
+.free-player.compact iframe { height: 152px; }
+.free-player.compact #fpToggle svg { transform: rotate(180deg); }
+.free-hint { font-size: 13px; color: var(--muted); margin-top: 14px; }
+
 /* ---------- Mobile ---------- */
 @media (max-width: 820px) {
   :root { --player-h: 66px; --nav-h: 62px; }
@@ -280,7 +298,10 @@ input[type="range"]:hover { background: linear-gradient(to right, var(--accent) 
   .row { grid-template-columns: 44px 1fr auto; gap: 10px; padding: 6px 4px; }
   .row .num, .row .dur { display: none; }
   input[type="range"]::-webkit-slider-thumb { opacity: 1; }
+  .free-player { left: 8px; right: 8px; width: auto; bottom: calc(var(--nav-h) + var(--safe-b) + 8px); border-radius: 16px; }
+  .free-player iframe { height: min(420px, 55vh); }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+body.free .toasts { bottom: calc(var(--fp-h, 0px) + var(--nav-h) + 24px + var(--safe-b)); }
